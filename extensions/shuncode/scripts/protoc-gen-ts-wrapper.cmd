@@ -1,0 +1,1 @@
+"C:\Program Files\nodejs\node.exe" "D:\Users\Admin\Desktop\shuncode\vscode\extensions\shuncode\node_modules\ts-proto\build\src\plugin.js" %*

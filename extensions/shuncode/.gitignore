@@ -1,0 +1,56 @@
+out
+dist
+dist-standalone
+node_modules
+tmp
+.vscode-test/
+*.vsix
+
+.DS_Store
+.idea
+.husky/_/
+
+pnpm-lock.yaml
+
+.clineignore
+.venv
+.actrc
+CLAUDE.local.md
+
+webview-ui/src/**/*.js
+webview-ui/src/**/*.js.map
+
+# Ignore coverage directories and files
+coverage
+coverage-unit
+.nyc_output
+# But don't ignore the coverage scripts in .github/scripts/
+!.github/scripts/coverage/
+
+*evals.env
+.env
+.secrets
+.github/act/.secrets
+
+.worktrees
+
+## Generated files ##
+src/generated/
+src/shared/proto/
+webview-ui/src/services/grpc-client.ts
+
+# E2E Tests
+test-results
+
+/.github/act
+/pkg
+.secrets
+
+# Bundled voice archives (large binaries, not for git)
+assets/voice/
+
+# Whisper model & binaries (large, download separately)
+vendor/whisper/
+
+# ONNX embedding models (downloaded automatically on first run)
+models/

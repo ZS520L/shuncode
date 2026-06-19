@@ -1,0 +1,35 @@
+import { RecordedAudio } from "@shared/proto/shuncode/dictation"
+import { audioRecordingService } from "@/services/dictation/AudioRecordingService"
+import { telemetryService } from "@/services/telemetry"
+import { Logger } from "@/shared/services/Logger"
+import { Controller } from ".."
+
+/**
+ * Stops audio recording and returns the recorded audio.
+ */
+export const stopRecording = async (controller: Controller): Promise<RecordedAudio> => {
+	const taskId = controller.task?.taskId
+	const recordingStatus = audioRecordingService.getRecordingStatus()
+	const recordingDuration = recordingStatus.durationSeconds * 1000
+
+	try {
+		const result = await audioRecordingService.stopRecording()
+
+		telemetryService.captureVoiceRecordingStopped(taskId, recordingDuration, result.success, process.platform)
+
+		return RecordedAudio.create({
+			success: result.success,
+			audioBase64: result.audioBase64 ?? "",
+			error: result.error ?? "",
+		})
+	} catch (error) {
+		Logger.error("Error stopping recording:", error)
+		telemetryService.captureVoiceRecordingStopped(taskId, recordingDuration, false, process.platform)
+
+		return RecordedAudio.create({
+			success: false,
+			audioBase64: "",
+			error: error instanceof Error ? error.message : "Unknown error occurred",
+		})
+	}
+}

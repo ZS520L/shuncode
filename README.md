@@ -5,7 +5,7 @@
 ShunCode is a fork of VS Code with a deeply integrated AI agent. Unlike extensions (Copilot, Continue, etc.), the AI is part of the editor itself — giving full control over UX, performance, and security.
 
 <p align="center">
-  <img src="./docs/shuncode/hero-demo.gif" alt="ShunCode AI in action" width="900">
+  <img src="./docs/shuncode/home.png" alt="ShunCode AI in action" width="900">
 </p>
 
 <p align="center">

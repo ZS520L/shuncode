@@ -1,0 +1,1012 @@
+/**
+ * Utility functions for message filtering, grouping, and manipulation
+ */
+
+import { combineApiRequests } from "@shared/combineApiRequests"
+import { combineCommandSequences } from "@shared/combineCommandSequences"
+import { ShuncodeMessage, ShuncodeSayBrowserAction, ShuncodeSayTool } from "@shared/ExtensionMessage"
+import {
+	FileIcon,
+	FileMinusIcon,
+	FilePlusIcon,
+	FolderOpenDotIcon,
+	FolderOpenIcon,
+	GlobeIcon,
+	PencilIcon,
+	SearchIcon,
+	ShapesIcon,
+	WrenchIcon,
+} from "lucide-react"
+
+/**
+ * All tool types that should be grouped into a collapsible accordion (Cursor-style).
+ * Previously only "low-stakes" reads were grouped; now ALL auto-executed tools are grouped.
+ */
+const GROUPABLE_TOOLS = new Set([
+	// Read tools
+	"readFile",
+	"listFilesTopLevel",
+	"listFilesRecursive",
+	"listCodeDefinitionNames",
+	"goToDefinition",
+	"findReferences",
+	"getHover",
+	"searchFiles",
+	"glob",
+	"readDiagnostics",
+	// Write/edit tools
+	"editedExistingFile",
+	"newFileCreated",
+	"fileDeleted",
+	// Web tools
+	"webSearch",
+	"webFetch",
+	// Other
+	"summarizeTask",
+	"useSkill",
+])
+
+/**
+ * Check if a tool message should be grouped into the collapsible accordion.
+ * Also matches command messages (say="command" or ask="command").
+ */
+export function isLowStakesTool(message: ShuncodeMessage): boolean {
+	// Command messages
+	if (message.say === "command" || message.ask === "command") {
+		return true
+	}
+	if (message.say !== "tool" && message.ask !== "tool") {
+		return false
+	}
+	try {
+		const tool = JSON.parse(message.text || "{}") as ShuncodeSayTool
+		return GROUPABLE_TOOLS.has(tool.tool)
+	} catch {
+		return false
+	}
+}
+
+/**
+ * Check if a message group is a process block (array with _isProcessBlock marker).
+ * Process blocks contain the entire AI work process: text, tools, reasoning, api_req_started.
+ */
+export function isProcessBlock(item: ShuncodeMessage | ShuncodeMessage[]): item is ShuncodeMessage[] & { _isProcessBlock: true } {
+	return Array.isArray(item) && (item as any)._isProcessBlock === true
+}
+
+/** @deprecated Use isProcessBlock instead */
+export function isToolGroup(item: ShuncodeMessage | ShuncodeMessage[]): item is ShuncodeMessage[] & { _isToolGroup: true } {
+	return isProcessBlock(item) as any
+}
+
+/** Edit/write tools that should render as visible cards outside ProcessBlock */
+const EDIT_TOOL_NAMES = new Set(["editedExistingFile", "newFileCreated", "fileDeleted"])
+
+export function isEditTool(msg: ShuncodeMessage): boolean {
+	if (msg.say === "command" || msg.ask === "command") {
+		return false
+	}
+	try {
+		const tool = JSON.parse(msg.text || "{}") as { tool?: string }
+		return EDIT_TOOL_NAMES.has(tool.tool || "")
+	} catch {
+		return false
+	}
+}
+
+/** Read file tools that should render as simple flat lines outside ProcessBlock */
+export function isReadFileTool(msg: ShuncodeMessage): boolean {
+	if (msg.say === "command" || msg.ask === "command") {
+		return false
+	}
+	try {
+		const tool = JSON.parse(msg.text || "{}") as { tool?: string }
+		return tool.tool === "readFile" || tool.tool === "readFiles"
+	} catch {
+		return false
+	}
+}
+
+/** Fast Context tool — rendered as standalone card outside ProcessBlock (no ChatRow wrapper) */
+export function isFastContextTool(msg: ShuncodeMessage): boolean {
+	if (msg.say !== "tool" && msg.ask !== "tool") {
+		return false
+	}
+	try {
+		const tool = JSON.parse(msg.text || "{}") as { tool?: string }
+		return tool.tool === "fastContext"
+	} catch {
+		return false
+	}
+}
+
+/**
+ * Check if a message group is a ReadFile group (array with _isReadFileGroup marker).
+ */
+export function isReadFileGroup(item: ShuncodeMessage | ShuncodeMessage[]): item is ShuncodeMessage[] & { _isReadFileGroup: true } {
+	return Array.isArray(item) && (item as any)._isReadFileGroup === true
+}
+
+/**
+ * Group consecutive readFile standalone messages into collapsible groups.
+ * Groups 2+ consecutive reads regardless of whether they're for the same or different files.
+ * Must run AFTER groupLowStakesTools.
+ */
+export function groupConsecutiveReadFiles(items: (ShuncodeMessage | ShuncodeMessage[])[]): (ShuncodeMessage | ShuncodeMessage[])[] {
+	const result: (ShuncodeMessage | ShuncodeMessage[])[] = []
+	let readBuffer: ShuncodeMessage[] = []
+
+	const commitReadBuffer = () => {
+		if (readBuffer.length === 0) return
+		if (readBuffer.length === 1) {
+			// Single read — just pass through as standalone
+			result.push(readBuffer[0])
+		} else {
+			// Multiple consecutive reads — group them (same or different files)
+			const group = readBuffer as ShuncodeMessage[] & { _isReadFileGroup: boolean }
+			group._isReadFileGroup = true
+			result.push(group)
+		}
+		readBuffer = []
+	}
+
+	for (const item of items) {
+		if (!Array.isArray(item) && isReadFileTool(item)) {
+			readBuffer.push(item)
+		} else {
+			// Non-readFile item — commit buffer and pass through
+			commitReadBuffer()
+			result.push(item)
+		}
+	}
+
+	commitReadBuffer()
+	return result
+}
+
+/**
+ * Combine API requests and command sequences in messages
+ */
+export function processMessages(messages: ShuncodeMessage[]): ShuncodeMessage[] {
+	return combineApiRequests(combineCommandSequences(messages))
+}
+
+/**
+ * Filter messages that should be visible in the chat
+ */
+export function filterVisibleMessages(messages: ShuncodeMessage[]): ShuncodeMessage[] {
+	return messages.filter((message) => {
+		switch (message.ask) {
+			case "completion_result":
+				// don't show a chat row for a completion_result ask without text. This specific type of message only occurs if shuncode wants to execute a command as part of its completion result, in which case we interject the completion_result tool with the execute_command tool.
+				if (message.text === "") {
+					return false
+				}
+				break
+			case "api_req_failed": // this message is used to update the latest api_req_started that the request failed
+			case "resume_task":
+			case "resume_completed_task":
+				return false
+		}
+		switch (message.say) {
+			case "api_req_finished": // combineApiRequests removes this from modifiedMessages anyways
+			case "api_req_retried": // this message is used to update the latest api_req_started that the request was retried
+			case "deleted_api_reqs": // aggregated api_req metrics from deleted messages
+			case "task_progress": // task progress messages are displayed in TaskHeader, not in main chat
+				return false
+			// NOTE: reasoning passes through to be included in tool groups
+			case "api_req_started":
+				// Keep api_req_started visible so the Brain "thinking" UI can remain above
+				// subsequent tool/text output (especially for non-exploratory operations).
+				break
+			case "text":
+				// Sometimes shuncode returns an empty text message, we don't want to render these. (We also use a say text for user messages, so in case they just sent images we still render that)
+				if ((message.text ?? "") === "" && (message.images?.length ?? 0) === 0) {
+					return false
+				}
+				break
+			case "mcp_server_request_started":
+				return false
+		}
+		return true
+	})
+}
+
+/**
+ * Check if a message is part of a browser session
+ */
+export function isBrowserSessionMessage(message: ShuncodeMessage): boolean {
+	if (message.type === "ask") {
+		return ["browser_action_launch"].includes(message.ask!)
+	}
+	if (message.type === "say") {
+		return [
+			"browser_action_launch",
+			"api_req_started",
+			"text",
+			"browser_action",
+			"browser_action_result",
+			"checkpoint_created",
+			"reasoning",
+			"error_retry",
+		].includes(message.say!)
+	}
+	return false
+}
+
+/**
+ * Group messages, combining browser session messages into arrays
+ */
+export function groupMessages(visibleMessages: ShuncodeMessage[]): (ShuncodeMessage | ShuncodeMessage[])[] {
+	const result: (ShuncodeMessage | ShuncodeMessage[])[] = []
+	let currentGroup: ShuncodeMessage[] = []
+	let isInBrowserSession = false
+
+	const endBrowserSession = () => {
+		if (currentGroup.length > 0) {
+			result.push([...currentGroup])
+			currentGroup = []
+			isInBrowserSession = false
+		}
+	}
+
+	visibleMessages.forEach((message) => {
+		if (message.ask === "browser_action_launch" || message.say === "browser_action_launch") {
+			// complete existing browser session if any
+			endBrowserSession()
+			// start new
+			isInBrowserSession = true
+			currentGroup.push(message)
+		} else if (isInBrowserSession) {
+			// end session if api_req_started is cancelled
+			if (message.say === "api_req_started") {
+				// get last api_req_started in currentGroup to check if it's cancelled
+				const lastApiReqStarted = [...currentGroup].reverse().find((m) => m.say === "api_req_started")
+				if (lastApiReqStarted?.text != null) {
+					const info = JSON.parse(lastApiReqStarted.text)
+					const isCancelled = info.cancelReason != null
+					if (isCancelled) {
+						endBrowserSession()
+						result.push(message)
+						return
+					}
+				}
+			}
+
+			if (isBrowserSessionMessage(message)) {
+				currentGroup.push(message)
+
+				// Check if this is a close action
+				if (message.say === "browser_action") {
+					const browserAction = JSON.parse(message.text || "{}") as ShuncodeSayBrowserAction
+					if (browserAction.action === "close") {
+						endBrowserSession()
+					}
+				}
+			} else {
+				// complete existing browser session if any
+				endBrowserSession()
+				result.push(message)
+			}
+		} else {
+			result.push(message)
+		}
+	})
+
+	// Handle case where browser session is the last group
+	if (currentGroup.length > 0) {
+		result.push([...currentGroup])
+	}
+
+	return result
+}
+
+/**
+ * Get the task message from the messages array
+ */
+export function getTaskMessage(messages: ShuncodeMessage[]): ShuncodeMessage | undefined {
+	return messages.at(0)
+}
+
+/**
+ * Check if we should show the scroll to bottom button
+ */
+export function shouldShowScrollButton(disableAutoScroll: boolean, isAtBottom: boolean): boolean {
+	return disableAutoScroll && !isAtBottom
+}
+
+/**
+ * Find reasoning content associated with an api_req_started message.
+ * Also returns whether response content (non-reasoning) has started.
+ */
+export function findReasoningForApiReq(
+	apiReqTs: number,
+	allMessages: ShuncodeMessage[],
+): { reasoning: string | undefined; responseStarted: boolean } {
+	const apiReqIndex = allMessages.findIndex((m) => m.ts === apiReqTs && m.say === "api_req_started")
+	if (apiReqIndex === -1) {
+		return { reasoning: undefined, responseStarted: false }
+	}
+
+	// Reasoning shown for this API round = only messages before the first user-visible / tool output.
+	const reasoningParts: string[] = []
+	let responseStarted = false
+
+	for (let i = apiReqIndex + 1; i < allMessages.length; i++) {
+		const msg = allMessages[i]
+		if (msg.say === "api_req_started") {
+			break
+		}
+		if (msg.say === "text" || msg.say === "tool" || msg.ask === "tool" || msg.ask === "command" || msg.say === "command") {
+			responseStarted = true
+			break
+		}
+		if (msg.say === "reasoning" && msg.text) {
+			reasoningParts.push(msg.text)
+		}
+	}
+
+	return {
+		reasoning: reasoningParts.length > 0 ? reasoningParts.join("\n\n") : undefined,
+		responseStarted,
+	}
+}
+
+/**
+ * Find the API request info for a checkpoint message.
+ * Looks backwards from the checkpoint to find the preceding api_req_started.
+ * Returns cost and request content.
+ */
+export function findApiReqInfoForCheckpoint(
+	checkpointTs: number,
+	allMessages: ShuncodeMessage[],
+): { cost: number | undefined; request: string | undefined } {
+	const checkpointIndex = allMessages.findIndex((m) => m.ts === checkpointTs && m.say === "checkpoint_created")
+	if (checkpointIndex === -1) {
+		return { cost: undefined, request: undefined }
+	}
+
+	// Look backwards for the most recent api_req_started
+	for (let i = checkpointIndex - 1; i >= 0; i--) {
+		const msg = allMessages[i]
+		if (msg.say === "api_req_started" && msg.text) {
+			try {
+				const info = JSON.parse(msg.text)
+				return {
+					cost: info.cost,
+					request: info.request,
+				}
+			} catch {
+				return { cost: undefined, request: undefined }
+			}
+		}
+	}
+	return { cost: undefined, request: undefined }
+}
+
+/**
+ * Check if a checkpoint at the given index would be displayed (not absorbed into a tool group).
+ * A checkpoint is absorbed if it's PRECEDED by low-stakes tools (meaning we're in a tool group).
+ * A checkpoint is displayed if it's preceded by non-tool content (meaning no active tool group).
+ */
+function isDisplayedCheckpoint(checkpointIndex: number, allMessages: ShuncodeMessage[]): boolean {
+	// Look BACKWARDS to see if we're in a tool group
+	// A checkpoint is absorbed if the previous meaningful content was a low-stakes tool
+	for (let i = checkpointIndex - 1; i >= 0; i--) {
+		const msg = allMessages[i]
+
+		// Skip api_req messages - they don't affect tool group status
+		if (msg.say === "api_req_started" || msg.say === "api_req_finished") {
+			continue
+		}
+
+		// Skip reasoning messages
+		if (msg.say === "reasoning") {
+			continue
+		}
+
+		// Skip other checkpoints - they don't end tool groups
+		if (msg.say === "checkpoint_created") {
+			continue
+		}
+
+		// If preceded by a groupable tool, this checkpoint is in the tool group (absorbed)
+		if (isLowStakesTool(msg)) {
+			return false // absorbed into tool group
+		}
+
+		// Any other content before this checkpoint ends the tool group, so this is displayed
+		return true
+	}
+
+	// Start of messages - checkpoint is displayed (no preceding tool group)
+	return true
+}
+
+/**
+ * Find the total cost for the segment starting at a checkpoint.
+ * Looks FORWARD from the checkpoint to the next DISPLAYED checkpoint (skipping absorbed ones).
+ * Sums all api_req_started costs in between.
+ * Returns undefined if the segment is incomplete (no next displayed checkpoint yet).
+ */
+export function findNextSegmentCost(checkpointTs: number, allMessages: ShuncodeMessage[]): number | undefined {
+	const checkpointIndex = allMessages.findIndex((m) => m.ts === checkpointTs && m.say === "checkpoint_created")
+	if (checkpointIndex === -1) {
+		return undefined
+	}
+	// Find the next DISPLAYED checkpoint (skip absorbed ones)
+	let nextDisplayedCheckpointIndex = -1
+	for (let i = checkpointIndex + 1; i < allMessages.length; i++) {
+		if (allMessages[i].say === "checkpoint_created") {
+			if (isDisplayedCheckpoint(i, allMessages)) {
+				nextDisplayedCheckpointIndex = i
+				break
+			}
+			// Otherwise continue looking for next displayed checkpoint
+		}
+	}
+
+	// If no next displayed checkpoint, sum to end of messages (in-progress segment)
+	const endIndex = nextDisplayedCheckpointIndex === -1 ? allMessages.length : nextDisplayedCheckpointIndex
+
+	// Sum all api_req_started costs between this checkpoint and the end
+	let totalCost = 0
+	for (let i = checkpointIndex + 1; i < endIndex; i++) {
+		const msg = allMessages[i]
+		if (msg.say === "api_req_started" && msg.text) {
+			try {
+				const info = JSON.parse(msg.text)
+				if (typeof info.cost === "number") {
+					totalCost += info.cost
+				}
+			} catch {
+				// ignore parse errors
+			}
+		}
+	}
+
+	return totalCost > 0 ? totalCost : undefined
+}
+
+/**
+ * Check if a text message's associated API request is still in progress.
+ * Returns true if there's no cost yet on the parent api_req_started.
+ */
+export function isTextMessagePendingToolCall(textTs: number, allMessages: ShuncodeMessage[]): boolean {
+	// Find the api_req_started that precedes this text message
+	const textIndex = allMessages.findIndex((m) => m.ts === textTs)
+	if (textIndex === -1) {
+		return false
+	}
+
+	// Look backwards for the most recent api_req_started
+	for (let i = textIndex - 1; i >= 0; i--) {
+		const msg = allMessages[i]
+		if (msg.say === "api_req_started" && msg.text) {
+			try {
+				const info = JSON.parse(msg.text)
+				// If no cost, the request is still in progress
+				return info.cost == null
+			} catch {
+				return false
+			}
+		}
+	}
+	return false
+}
+
+/**
+ * Check if a tool group should be hidden because its tools are currently being
+ * displayed in the loading state animation.
+ *
+ * Returns true when:
+ * 1. (Case A) The MOST RECENT api_req_started overall has no cost (loading state is active) AND
+ *    this tool group falls in the "current activities" range (between the previous completed api_req and the current one)
+ * 2. (Case B) The MOST RECENT api_req_started overall has cost (is complete) AND
+ *    this tool group appears after it (just arrived, waiting to be shown as "in flight")
+ *
+ * This mirrors the ChatRow currentActivities logic - we only hide tools that are
+ * actively being shown in the loading state, not older tool groups.
+ */
+export function isToolGroupInFlight(toolGroupMessages: ShuncodeMessage[], allMessages: ShuncodeMessage[]): boolean {
+	if (toolGroupMessages.length === 0) {
+		return false
+	}
+
+	// Step 1: Find the MOST RECENT api_req_started overall (search backwards)
+	let mostRecentApiReq: ShuncodeMessage | null = null
+	let mostRecentApiReqIndex = -1
+	for (let i = allMessages.length - 1; i >= 0; i--) {
+		if (allMessages[i].say === "api_req_started") {
+			mostRecentApiReq = allMessages[i]
+			mostRecentApiReqIndex = i
+			break
+		}
+	}
+
+	if (!mostRecentApiReq?.text) {
+		return false
+	}
+
+	// Step 2: Determine if most recent api_req is complete (has cost) or incomplete (no cost)
+	let mostRecentHasCost = false
+	try {
+		const info = JSON.parse(mostRecentApiReq.text)
+		mostRecentHasCost = info.cost != null
+	} catch {
+		return false
+	}
+
+	// Find the last tool in this group
+	const lastTool = [...toolGroupMessages].reverse().find((m) => isLowStakesTool(m))
+	if (!lastTool) {
+		return false
+	}
+
+	const toolIndex = allMessages.findIndex((m) => m.ts === lastTool.ts)
+	if (toolIndex === -1) {
+		return false
+	}
+
+	// Step 3: Determine if tool group is in-flight
+	if (!mostRecentHasCost) {
+		// CASE A: Most recent api_req is INCOMPLETE (loading state active)
+		// Tool group is in-flight if it's between prev completed and current incomplete
+
+		// Find the previous COMPLETED api_req
+		let prevCompletedApiReqIndex = -1
+		for (let i = mostRecentApiReqIndex - 1; i >= 0; i--) {
+			const msg = allMessages[i]
+			if (msg.say === "api_req_started" && msg.text) {
+				try {
+					const prevInfo = JSON.parse(msg.text)
+					if (prevInfo.cost != null) {
+						prevCompletedApiReqIndex = i
+						break
+					}
+				} catch {
+					/* continue searching */
+				}
+			}
+		}
+
+		// If no previous completed api_req, there's no "current activities" range
+		if (prevCompletedApiReqIndex === -1) {
+			return false
+		}
+
+		// Tool group is in-flight if AFTER prevCompleted AND BEFORE current
+		return toolIndex > prevCompletedApiReqIndex && toolIndex < mostRecentApiReqIndex
+	} else {
+		// CASE B: Most recent api_req is COMPLETE (has cost)
+		// Tool group is in-flight if it appears AFTER this completed api_req (just arrived)
+		return toolIndex > mostRecentApiReqIndex
+	}
+}
+
+/**
+ * Filter a tool group to exclude tools that are in the "current activities" range.
+ * Returns the filtered array of messages (may be empty).
+ *
+ * This is used so ToolGroupRenderer shows PAST tools (what's already in context),
+ * while the loading state shows ACTIVE tools (what's being "read" now).
+ *
+ * "Current activities" includes:
+ * - (Case A) Tools between a previous completed api_req and the current incomplete api_req
+ * - (Case B) Tools after the most recent api_req overall (either because it's complete, or no loading state is active yet)
+ */
+export function getToolsNotInCurrentActivities(toolGroupMessages: ShuncodeMessage[], allMessages: ShuncodeMessage[]): ShuncodeMessage[] {
+	// Build a Map of timestamp -> index for O(1) lookups instead of O(n) findIndex calls
+	const tsToIndex = new Map<number, number>()
+	for (let i = 0; i < allMessages.length; i++) {
+		tsToIndex.set(allMessages[i].ts, i)
+	}
+
+	// Step 1: Find the MOST RECENT api_req_started overall (search backwards)
+	let mostRecentApiReqIndex = -1
+	let mostRecentApiReq: ShuncodeMessage | null = null
+	for (let i = allMessages.length - 1; i >= 0; i--) {
+		if (allMessages[i].say === "api_req_started") {
+			mostRecentApiReqIndex = i
+			mostRecentApiReq = allMessages[i]
+			break
+		}
+	}
+
+	if (mostRecentApiReqIndex === -1) {
+		// No api_req at all - show all tools
+		return toolGroupMessages
+	}
+
+	if (!mostRecentApiReq?.text) {
+		return toolGroupMessages
+	}
+
+	// Step 2: Determine if most recent api_req is complete (has cost) or incomplete (no cost)
+	let mostRecentHasCost = false
+	try {
+		const info = JSON.parse(mostRecentApiReq.text)
+		mostRecentHasCost = info.cost != null
+	} catch {
+		return toolGroupMessages
+	}
+
+	// Step 3: Determine which tools are "in current activities"
+	if (!mostRecentHasCost) {
+		// CASE A: Most recent api_req is INCOMPLETE (loading state active)
+		// Tools are in-flight if they're between prev completed api_req and current incomplete one
+
+		// Find the previous COMPLETED api_req
+		let prevCompletedApiReqIndex = -1
+		for (let i = mostRecentApiReqIndex - 1; i >= 0; i--) {
+			const msg = allMessages[i]
+			if (msg.say === "api_req_started" && msg.text) {
+				try {
+					const prevInfo = JSON.parse(msg.text)
+					if (prevInfo.cost != null) {
+						prevCompletedApiReqIndex = i
+						break
+					}
+				} catch {
+					/* continue searching */
+				}
+			}
+		}
+
+		if (prevCompletedApiReqIndex === -1) {
+			// No previous completed api_req, so no tools are in the "current activities" range
+			return toolGroupMessages
+		}
+
+		// Filter out tools in the range (prevCompleted, current)
+		return toolGroupMessages.filter((msg) => {
+			// Keep non-low-stakes tools
+			if (!isLowStakesTool(msg)) {
+				return true
+			}
+
+			// Filter out only tools awaiting approval (ask === 'tool')
+			// Completed tools (say === 'tool') should still be shown
+			if (msg.ask === "tool") {
+				const toolIndex = tsToIndex.get(msg.ts)
+				if (toolIndex === undefined) {
+					return true
+				}
+				// Tool is in "current activities" range if AFTER prevCompleted AND BEFORE current
+				const isInCurrentActivitiesRange = toolIndex > prevCompletedApiReqIndex && toolIndex < mostRecentApiReqIndex
+				// Filter out if in current activities range
+				return !isInCurrentActivitiesRange
+			}
+
+			// Keep completed tools (say === 'tool')
+			return true
+		})
+	} else {
+		// CASE B: Most recent api_req is COMPLETE (has cost)
+		// Tools that appear AFTER this completed api_req are "in flight" (just arrived)
+		// Filter them out so they appear in currentActivities instead
+
+		return toolGroupMessages.filter((msg) => {
+			// Keep non-low-stakes tools
+			if (!isLowStakesTool(msg)) {
+				return true
+			}
+
+			// Filter out only tools awaiting approval (ask === 'tool')
+			// Completed tools (say === 'tool') should still be shown
+			if (msg.ask === "tool") {
+				const toolIndex = tsToIndex.get(msg.ts)
+				if (toolIndex === undefined) {
+					return true
+				}
+				// Tool is in "current activities" if it appears AFTER the most recent api_req
+				const isInCurrentActivitiesRange = toolIndex > mostRecentApiReqIndex
+				// Filter out if in current activities range
+				return !isInCurrentActivitiesRange
+			}
+
+			// Keep completed tools (say === 'tool')
+			return true
+		})
+	}
+}
+
+/**
+ * Returns true if this api_req_started should be fully absorbed into a low-stakes tool group.
+ *
+ * This scans FORWARD from the api_req_started until the next api_req_started and checks:
+ * - at least one low-stakes tool exists
+ * - no high-stakes tool/command exists
+ *
+ * Note: this operates on a flat `ShuncodeMessage[]` (e.g. `modifiedMessages`) rather than
+ * grouped messages. It is used at render time to avoid transient UI frames where
+ * `api_req_started` briefly appears before grouping absorbs it.
+ */
+export function isApiReqAbsorbable(apiReqTs: number, allMessages: ShuncodeMessage[]): boolean {
+	const apiReqIndex = allMessages.findIndex((m) => m.ts === apiReqTs && m.say === "api_req_started")
+	if (apiReqIndex === -1) {
+		return false
+	}
+
+	let hasLowStakesTool = false
+	for (let i = apiReqIndex + 1; i < allMessages.length; i++) {
+		const msg = allMessages[i]
+		if (msg.say === "api_req_started") {
+			break
+		}
+
+		// Reasoning and checkpoints do not affect absorbability
+		if (msg.say === "reasoning" || msg.say === "checkpoint_created") {
+			continue
+		}
+
+		// Text is allowed (we still want to absorb api_req into the tool group)
+		if (msg.say === "text") {
+			continue
+		}
+
+		// Low-stakes tools mark absorbability
+		if (isLowStakesTool(msg)) {
+			hasLowStakesTool = true
+			continue
+		}
+
+		// All tool/command messages are now groupable (Cursor-style)
+		if (msg.say === "tool" || msg.ask === "tool" || msg.say === "command" || msg.ask === "command") {
+			hasLowStakesTool = true
+		}
+	}
+
+	return hasLowStakesTool
+}
+
+/**
+ * Check if an api_req_started at a given index produces low-stakes tools
+ * (regardless of whether it also produces text).
+ * If so, it should be absorbed into the tool group rather than rendered separately.
+ * The key is: no HIGH-stakes tools (write, edit, command, etc.)
+ */
+function _isApiReqFollowedOnlyByLowStakesTools(index: number, messages: (ShuncodeMessage | ShuncodeMessage[])[]): boolean {
+	let hasLowStakesTool = false
+	for (let i = index + 1; i < messages.length; i++) {
+		const item = messages[i]
+		if (Array.isArray(item)) {
+			// Browser session - this ends the low-stakes run
+			break
+		}
+		const msg = item
+		// Another api_req_started - stop checking
+		if (msg.say === "api_req_started") {
+			break
+		}
+		// Reasoning is allowed
+		if (msg.say === "reasoning") {
+			continue
+		}
+		// Low-stakes tool - mark it
+		if (isLowStakesTool(msg)) {
+			hasLowStakesTool = true
+			continue
+		}
+		// Checkpoint is OK
+		if (msg.say === "checkpoint_created") {
+			continue
+		}
+		// Text is OK - it will render separately, but we still absorb api_req
+		if (msg.say === "text") {
+			continue
+		}
+		// High-stakes tool (write, edit, command, etc.) - don't absorb
+		if (msg.say === "tool" || msg.ask === "tool" || msg.ask === "command" || msg.say === "command") {
+			return false
+		}
+	}
+	return hasLowStakesTool
+}
+
+/**
+ * Group the entire AI process (text, tools, reasoning, api_req) into a single ProcessBlock.
+ * The ProcessBlock is displayed as a compact scrollable container during streaming,
+ * and collapses into a summary line when done. Only the final text remains outside.
+ *
+ * Should be called after groupMessages.
+ */
+export function groupLowStakesTools(groupedMessages: (ShuncodeMessage | ShuncodeMessage[])[]): (ShuncodeMessage | ShuncodeMessage[])[] {
+	const result: (ShuncodeMessage | ShuncodeMessage[])[] = []
+	let processBlock: ShuncodeMessage[] = []
+	let hasTools = false
+
+	const commitProcessBlock = () => {
+		if (processBlock.length === 0) {
+			hasTools = false
+			return
+		}
+
+		// Create process block if there are tools, OR any partial message (streaming),
+		// OR any reasoning/api_req (indicates active AI work even between tool calls)
+		const hasWorkContent = processBlock.some(
+			(m) => m.partial === true || m.say === "reasoning" || m.say === "api_req_started",
+		)
+		const shouldGroup = hasTools || hasWorkContent
+
+		if (shouldGroup) {
+			const group = processBlock as ShuncodeMessage[] & { _isProcessBlock: boolean }
+			group._isProcessBlock = true
+			result.push(group)
+		} else {
+			// No tools and not streaming — render messages individually
+			for (const m of processBlock) {
+				result.push(m)
+			}
+		}
+		processBlock = []
+		hasTools = false
+	}
+
+	for (const item of groupedMessages) {
+		// Browser session group - commit current work and pass through
+		if (Array.isArray(item)) {
+			commitProcessBlock()
+			result.push(item)
+			continue
+		}
+
+		const message = item
+		const messageType = message.say
+
+		// Edit/write tools — render OUTSIDE process block as visible edit cards
+		if (isLowStakesTool(message) && isEditTool(message)) {
+			// Commit current thinking block, show edit card, then continue accumulating
+			commitProcessBlock()
+			result.push(message) // Rendered as standalone edit card
+			continue
+		}
+
+		// Read file tools — render OUTSIDE process block as simple flat lines
+		if (isLowStakesTool(message) && isReadFileTool(message)) {
+			commitProcessBlock()
+			result.push(message) // Rendered as standalone flat line via ChatRow → ToolRow
+			continue
+		}
+
+		// Fast Context tool — render OUTSIDE process block as standalone card
+		if (isFastContextTool(message)) {
+			commitProcessBlock()
+			result.push(message) // Rendered directly in MessageRenderer
+			continue
+		}
+
+		// Other tools (read, search, etc.) — into process block
+		if (isLowStakesTool(message)) {
+			hasTools = true
+			processBlock.push(message)
+			continue
+		}
+
+		// Reasoning — into process block (shown dimmed inside the scrolling container)
+		if (messageType === "reasoning") {
+			if (hasTools) {
+				commitProcessBlock()
+			}
+			processBlock.push(message)
+			continue
+		}
+
+		// API request — always into process block.
+		// If no tools follow, commitProcessBlock renders individually (no block wrapper).
+		// This prevents "jump" effect during streaming when tools haven't arrived yet.
+		if (messageType === "api_req_started") {
+			if (hasTools) {
+				commitProcessBlock()
+			}
+			processBlock.push(message)
+			continue
+		}
+
+		// Checkpoint — into process block
+		if (messageType === "checkpoint_created") {
+			processBlock.push(message)
+			continue
+		}
+
+		// Assistant text is user-visible. Commit the pending ProcessBlock first so render
+		// order is always ProcessBlock (thinking/tools) → then this text row.
+		if (messageType === "text") {
+			commitProcessBlock()
+			result.push(message)
+			continue
+		}
+
+		// Everything else (completion_result, user_feedback, etc.) — commit and pass through
+		commitProcessBlock()
+		result.push(message)
+	}
+
+	// Finalize
+	commitProcessBlock()
+	return result
+}
+
+/**
+ * A turn = one user message + all AI responses until the next user message.
+ */
+export interface TurnData {
+	/** The message that started this turn (user_feedback or task) */
+	userMessage: ShuncodeMessage
+	/** All grouped items (ProcessBlocks, EditCards, text, etc.) within this turn */
+	items: (ShuncodeMessage | ShuncodeMessage[])[]
+	/** True when the header comes from the task message (already shown in TaskSection).
+	 *  TurnBlock skips the sticky header for task-turns to avoid duplication. */
+	isTaskTurn: boolean
+}
+
+/**
+ * Group flat groupedMessages into turns, splitting at each user_feedback.
+ *
+ * @param task — messages[0] (say="task"). Creates the implicit first turn so
+ *               AI responses before the first user_feedback are not lost.
+ *               TaskSection already renders this message, so TurnBlock hides
+ *               the sticky header for this turn.
+ */
+export function groupByTurns(
+	groupedMessages: (ShuncodeMessage | ShuncodeMessage[])[],
+	task?: ShuncodeMessage,
+): TurnData[] {
+	const turns: TurnData[] = []
+
+	// Start with the task as the implicit first turn.
+	let currentTurn: TurnData | null = task
+		? { userMessage: task, items: [], isTaskTurn: true }
+		: null
+
+	for (const item of groupedMessages) {
+		const msg = Array.isArray(item) ? null : item
+
+		if (msg?.say === "user_feedback") {
+			// Commit the previous turn (task-turn or earlier user_feedback turn)
+			if (currentTurn) turns.push(currentTurn)
+			// Start a new turn from this user message
+			currentTurn = { userMessage: msg, items: [], isTaskTurn: false }
+		} else if (currentTurn) {
+			currentTurn.items.push(item)
+		}
+	}
+
+	// Commit the last turn
+	if (currentTurn) turns.push(currentTurn)
+
+	return turns
+}
+
+export function getIconByToolName(toolName: string) {
+	switch (toolName) {
+		case "readFile":
+		case "readDiagnostics":
+			return FileIcon
+		case "listFilesTopLevel":
+			return FolderOpenIcon
+		case "listFilesRecursive":
+			return FolderOpenDotIcon
+		case "searchFiles":
+		case "glob":
+		case "webSearch":
+			return SearchIcon
+		case "listCodeDefinitionNames":
+		case "goToDefinition":
+		case "findReferences":
+		case "getHover":
+			return ShapesIcon
+		case "editedExistingFile":
+			return PencilIcon
+		case "newFileCreated":
+			return FilePlusIcon
+		case "fileDeleted":
+			return FileMinusIcon
+		case "webFetch":
+			return GlobeIcon
+		case "fastContext":
+			return SearchIcon
+		default:
+			return WrenchIcon
+	}
+}

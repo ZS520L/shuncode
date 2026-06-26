@@ -1,0 +1,458 @@
+import { combineApiRequests } from "@shared/combineApiRequests"
+import { combineCommandSequences } from "@shared/combineCommandSequences"
+import { combineErrorRetryMessages } from "@shared/combineErrorRetryMessages"
+import { combineHookSequences } from "@shared/combineHookSequences"
+import type { ShuncodeMessage } from "@shared/ExtensionMessage"
+import { BooleanRequest, StringRequest } from "@shared/proto/shuncode/common"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useMount } from "react-use"
+import { normalizeApiConfiguration } from "@/components/settings/utils/providerUtils"
+import { useExtensionState } from "@/context/ExtensionStateContext"
+import { useShowNavbar } from "@/context/PlatformContext"
+import { useI18n } from "@/i18n"
+import { FileServiceClient, UiServiceClient } from "@/services/grpc-client"
+import { Navbar } from "../menu/Navbar"
+// Import utilities and hooks from the new structure
+import {
+	ActionButtons,
+	ApprovalBar,
+	CHAT_CONSTANTS,
+	ChatLayout,
+	convertHtmlToMarkdown,
+	filterVisibleMessages,
+	groupByTurns,
+	groupConsecutiveReadFiles,
+	groupLowStakesTools,
+	groupMessages,
+	InputSection,
+	MessagesArea,
+	useChatState,
+	useMessageHandlers,
+	useScrollBehavior,
+	useSession,
+	WelcomeSection,
+} from "./chat-view"
+import { useMessageQueue } from "./chat-view/hooks/useMessageQueue"
+import { MessageQueue } from "./chat-view/MessageQueue"
+import PendingChangesBar from "./pending-changes/PendingChangesBar"
+
+interface ChatViewProps {
+	isHidden: boolean
+	showAnnouncement: boolean
+	hideAnnouncement: () => void
+	showHistoryView: () => void
+}
+
+// Use constants from the imported module
+const MAX_IMAGES_AND_FILES_PER_MESSAGE = CHAT_CONSTANTS.MAX_IMAGES_AND_FILES_PER_MESSAGE
+const QUICK_WINS_HISTORY_THRESHOLD = 3
+
+const ChatView = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryView }: ChatViewProps) => {
+	const { t } = useI18n()
+	const showNavbar = useShowNavbar()
+	const {
+		version,
+		shuncodeMessages: messages,
+		taskHistory,
+		apiConfiguration,
+		telemetrySetting,
+		mode,
+		userInfo,
+		hooksEnabled,
+		currentSessionId,
+	} = useExtensionState()
+
+	// --- NEW: Session-based state (pipeline architecture) ---
+	const session = useSession(currentSessionId ?? null)
+	const isProdHostedApp = userInfo?.apiBaseUrl === "#"
+	const shouldShowQuickWins = isProdHostedApp && (!taskHistory || taskHistory.length < QUICK_WINS_HISTORY_THRESHOLD)
+
+	//const task = messages.length > 0 ? (messages[0].say === "task" ? messages[0] : undefined) : undefined) : undefined
+	const task = useMemo(() => messages.at(0), [messages]) // leaving this less safe version here since if the first message is not a task, then the extension is in a bad state and needs to be debugged (see Shuncode.abort)
+
+	// isAiWorking defined below after chatState is created
+	const modifiedMessages = useMemo(() => {
+		const slicedMessages = messages.slice(1)
+		// Only combine hook sequences if hooks are enabled
+		const withHooks = hooksEnabled ? combineHookSequences(slicedMessages) : slicedMessages
+		return combineErrorRetryMessages(combineApiRequests(combineCommandSequences(withHooks)))
+	}, [messages, hooksEnabled])
+	// Use custom hooks for state management
+	const chatState = useChatState(messages)
+	const {
+		setInputValue,
+		selectedImages,
+		setSelectedImages,
+		selectedFiles,
+		setSelectedFiles,
+		sendingDisabled,
+		enableButtons,
+		expandedRows,
+		setExpandedRows,
+		textAreaRef,
+	} = chatState
+
+	// AI is "working" - heuristic based on message state
+	// NOTE: session.isWorking disabled — session infra is Step 1 (adapter),
+	// frontend subscribes AFTER backend emits "running", so it always misses the event.
+	// Will be re-enabled when session pipeline is fully wired (Step 6+).
+	const isAiWorking = useMemo(() => {
+		if (messages.length <= 1) {
+			return false
+		}
+		const lastMessage = messages.at(-1)
+		if (!lastMessage) {
+			return false
+		}
+		if (lastMessage.partial === true) {
+			return true
+		}
+		if (lastMessage.type === "say" && lastMessage.say === "api_req_started") {
+			return true
+		}
+		// No shuncodeAsk = AI processing between states
+		if (!chatState.shuncodeAsk && messages.length > 1) {
+			return true
+		}
+		return false
+	}, [messages, chatState.shuncodeAsk])
+
+	useEffect(() => {
+		const handleCopy = async (e: ClipboardEvent) => {
+			const targetElement = e.target as HTMLElement | null
+			// If the copy event originated from an input or textarea,
+			// let the default browser behavior handle it.
+			if (
+				targetElement &&
+				(targetElement.tagName === "INPUT" || targetElement.tagName === "TEXTAREA" || targetElement.isContentEditable)
+			) {
+				return
+			}
+
+			if (window.getSelection) {
+				const selection = window.getSelection()
+				if (selection && selection.rangeCount > 0) {
+					const range = selection.getRangeAt(0)
+					const commonAncestor = range.commonAncestorContainer
+					let textToCopy: string | null = null
+
+					// Check if the selection is inside an element where plain text copy is preferred
+					let currentElement =
+						commonAncestor.nodeType === Node.ELEMENT_NODE
+							? (commonAncestor as HTMLElement)
+							: commonAncestor.parentElement
+					let preferPlainTextCopy = false
+					while (currentElement) {
+						if (currentElement.tagName === "PRE" && currentElement.querySelector("code")) {
+							preferPlainTextCopy = true
+							break
+						}
+						// Check computed white-space style
+						const computedStyle = window.getComputedStyle(currentElement)
+						if (
+							computedStyle.whiteSpace === "pre" ||
+							computedStyle.whiteSpace === "pre-wrap" ||
+							computedStyle.whiteSpace === "pre-line"
+						) {
+							// If the element itself or an ancestor has pre-like white-space,
+							// and the selection is likely contained within it, prefer plain text.
+							// This helps with elements like the TaskHeader's text display.
+							preferPlainTextCopy = true
+							break
+						}
+
+						// Stop searching if we reach a known chat message boundary or body
+						if (
+							currentElement.classList.contains("chat-row-assistant-message-container") ||
+							currentElement.classList.contains("chat-row-user-message-container") ||
+							currentElement.tagName === "BODY"
+						) {
+							break
+						}
+						currentElement = currentElement.parentElement
+					}
+
+					if (preferPlainTextCopy) {
+						// For code blocks or elements with pre-formatted white-space, get plain text.
+						textToCopy = selection.toString()
+					} else {
+						// For other content, use the existing HTML-to-Markdown conversion
+						const clonedSelection = range.cloneContents()
+						const div = document.createElement("div")
+						div.appendChild(clonedSelection)
+						const selectedHtml = div.innerHTML
+						textToCopy = await convertHtmlToMarkdown(selectedHtml)
+					}
+
+					if (textToCopy !== null) {
+						try {
+							FileServiceClient.copyToClipboard(StringRequest.create({ value: textToCopy })).catch((err) => {
+								console.error("Error copying to clipboard:", err)
+							})
+							e.preventDefault()
+						} catch (error) {
+							console.error("Error copying to clipboard:", error)
+						}
+					}
+				}
+			}
+		}
+		document.addEventListener("copy", handleCopy)
+
+		return () => {
+			document.removeEventListener("copy", handleCopy)
+		}
+	}, [])
+	// Button state is now managed by useButtonState hook
+
+	// handleFocusChange is already provided by chatState
+
+	// Use message handlers hook
+	const messageHandlers = useMessageHandlers(messages, chatState)
+
+	// Message queue for Cursor-style queuing
+	const messageQueue = useMessageQueue(messages, chatState.shuncodeAsk)
+
+	const { selectedModelInfo } = useMemo(() => {
+		return normalizeApiConfiguration(apiConfiguration, mode)
+	}, [apiConfiguration, mode])
+
+	const selectFilesAndImages = useCallback(async () => {
+		try {
+			const response = await FileServiceClient.selectFiles(
+				BooleanRequest.create({
+					value: selectedModelInfo.supportsImages,
+				}),
+			)
+			if (
+				response &&
+				response.values1 &&
+				response.values2 &&
+				(response.values1.length > 0 || response.values2.length > 0)
+			) {
+				const currentTotal = selectedImages.length + selectedFiles.length
+				const availableSlots = MAX_IMAGES_AND_FILES_PER_MESSAGE - currentTotal
+
+				if (availableSlots > 0) {
+					// Prioritize images first
+					const imagesToAdd = Math.min(response.values1.length, availableSlots)
+					if (imagesToAdd > 0) {
+						setSelectedImages((prevImages) => [...prevImages, ...response.values1.slice(0, imagesToAdd)])
+					}
+
+					// Use remaining slots for files
+					const remainingSlots = availableSlots - imagesToAdd
+					if (remainingSlots > 0) {
+						setSelectedFiles((prevFiles) => [...prevFiles, ...response.values2.slice(0, remainingSlots)])
+					}
+				}
+			}
+		} catch (error) {
+			console.error("Error selecting images & files:", error)
+		}
+	}, [selectedModelInfo.supportsImages, selectedImages.length, selectedFiles.length])
+
+	const shouldDisableFilesAndImages = selectedImages.length + selectedFiles.length >= MAX_IMAGES_AND_FILES_PER_MESSAGE
+
+	// Subscribe to show webview events from the backend
+	useEffect(() => {
+		const cleanup = UiServiceClient.subscribeToShowWebview(
+			{},
+			{
+				onResponse: (event) => {
+					// Only focus if not hidden and preserveEditorFocus is false
+					if (!isHidden && !event.preserveEditorFocus) {
+						textAreaRef.current?.focus()
+					}
+				},
+				onError: (error) => {
+					console.error("Error in showWebview subscription:", error)
+				},
+				onComplete: () => {
+					console.log("showWebview subscription completed")
+				},
+			},
+		)
+
+		return cleanup
+	}, [isHidden])
+
+	// Set up addToInput subscription
+	useEffect(() => {
+		const cleanup = UiServiceClient.subscribeToAddToInput(
+			{},
+			{
+				onResponse: (event) => {
+					if (event.value) {
+						setInputValue((prevValue) => {
+							const newText = event.value
+							const newTextWithNewline = newText + "\n"
+							return prevValue ? `${prevValue}\n${newTextWithNewline}` : newTextWithNewline
+						})
+						// Add scroll to bottom after state update
+						// Auto focus the input and start the cursor on a new line for easy typing
+						setTimeout(() => {
+							if (textAreaRef.current) {
+								textAreaRef.current.scrollTop = textAreaRef.current.scrollHeight
+								textAreaRef.current.focus()
+							}
+						}, 0)
+					}
+				},
+				onError: (error) => {
+					console.error("Error in addToInput subscription:", error)
+				},
+				onComplete: () => {
+					console.log("addToInput subscription completed")
+				},
+			},
+		)
+
+		return cleanup
+	}, [])
+
+	useMount(() => {
+		// NOTE: the vscode window needs to be focused for this to work
+		textAreaRef.current?.focus()
+	})
+
+	useEffect(() => {
+		let id = requestAnimationFrame(() => {
+			if (!isHidden && !sendingDisabled && !enableButtons) {
+				textAreaRef.current?.focus()
+			}
+		})
+		return () => cancelAnimationFrame(id)
+	}, [isHidden, sendingDisabled, enableButtons])
+
+	// Focus textarea when task is cleared (e.g. "+" button in navbar)
+	const prevTaskRef = useRef(task)
+	useEffect(() => {
+		const hadTask = prevTaskRef.current
+		prevTaskRef.current = task
+		// Only focus when transitioning from having a task to no task
+		if (hadTask && !task && !isHidden) {
+			let alive = true
+			const chainFocus = () => {
+				if (!alive) {
+					return
+				}
+				textAreaRef.current?.focus()
+				requestAnimationFrame(() => {
+					if (!alive) {
+						return
+					}
+					textAreaRef.current?.focus()
+					requestAnimationFrame(() => {
+						if (!alive) {
+							return
+						}
+						textAreaRef.current?.focus()
+					})
+				})
+			}
+			const id = requestAnimationFrame(chainFocus)
+			return () => {
+				alive = false
+				cancelAnimationFrame(id)
+			}
+		}
+	}, [task, isHidden])
+
+	const visibleMessages = useMemo(() => {
+		return filterVisibleMessages(modifiedMessages)
+	}, [modifiedMessages])
+
+	const groupedMessages = useMemo(() => {
+		return groupConsecutiveReadFiles(groupLowStakesTools(groupMessages(visibleMessages)))
+	}, [visibleMessages])
+
+	const turns = useMemo(() => {
+		return groupByTurns(groupedMessages, task)
+	}, [groupedMessages, task])
+
+	// Use scroll behavior hook
+	const scrollBehavior = useScrollBehavior(messages, visibleMessages, turns, expandedRows, setExpandedRows)
+
+	const placeholderText = useMemo(() => {
+		const text = task ? t("chat.placeholder.message") : t("chat.placeholder.task")
+		return text
+	}, [task, t])
+
+	const handleCancel = useCallback(() => {
+		messageHandlers.executeButtonAction("cancel").catch((err) => {
+			console.error("[ChatView] cancel failed:", err)
+		})
+	}, [messageHandlers])
+
+	return (<>
+		<ChatLayout isHidden={isHidden}>
+			<div className="flex flex-col flex-1 overflow-hidden">
+			{showNavbar && <Navbar />}
+			{task ? null : (
+				<WelcomeSection
+					hideAnnouncement={hideAnnouncement}
+					shouldShowQuickWins={shouldShowQuickWins}
+					showAnnouncement={showAnnouncement}
+					showHistoryView={showHistoryView}
+					taskHistory={taskHistory}
+					telemetrySetting={telemetrySetting}
+					version={version}
+				/>
+			)}
+				{task && (
+					<MessagesArea
+						chatState={chatState}
+						messageHandlers={messageHandlers}
+						modifiedMessages={modifiedMessages}
+						scrollBehavior={scrollBehavior}
+						task={task}
+						turns={turns}
+					/>
+				)}
+			</div>
+			<footer className="bg-(--vscode-sidebar-background)" style={{ gridRow: "2" }}>
+				<PendingChangesBar />
+				<ApprovalBar
+					approvals={session.approvals}
+					onApprove={session.approve}
+					onReject={session.reject}
+				/>
+				<ActionButtons
+					chatState={chatState}
+					messageHandlers={messageHandlers}
+					messages={messages}
+					mode={mode}
+					scrollBehavior={{
+						scrollToBottomSmooth: scrollBehavior.scrollToBottomSmooth,
+						disableAutoScrollRef: scrollBehavior.disableAutoScrollRef,
+						showScrollToBottom: scrollBehavior.showScrollToBottom,
+					}}
+					task={task}
+				/>
+				<MessageQueue
+					onClearQueue={messageQueue.clearQueue}
+					onRemoveSelected={messageQueue.removeSelected}
+					onSelectItem={messageQueue.selectItem}
+					onSendNow={messageQueue.sendNow}
+					queue={messageQueue.queue}
+					selectedIndex={messageQueue.selectedIndex}
+				/>
+				<InputSection
+					chatState={chatState}
+					isAiWorking={isAiWorking}
+					messageHandlers={messageHandlers}
+					messageQueue={messageQueue}
+					onCancel={handleCancel}
+					placeholderText={placeholderText}
+					scrollBehavior={scrollBehavior}
+					selectFilesAndImages={selectFilesAndImages}
+					shouldDisableFilesAndImages={shouldDisableFilesAndImages}
+				/>
+			</footer>
+		</ChatLayout>
+	</>
+	)
+}
+
+export default ChatView

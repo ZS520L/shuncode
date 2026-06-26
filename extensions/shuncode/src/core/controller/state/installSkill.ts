@@ -1,0 +1,1 @@
+export { installSkill } from "./skills"

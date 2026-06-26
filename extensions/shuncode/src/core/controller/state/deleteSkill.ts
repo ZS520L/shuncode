@@ -1,0 +1,1 @@
+export { deleteSkill } from "./skills"

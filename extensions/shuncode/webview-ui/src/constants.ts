@@ -1,0 +1,6 @@
+export const LINKS = {
+	DOCUMENTATION: {
+		REMOTE_MCP_SERVER_DOCS: "#",
+		LOCAL_MCP_SERVER_DOCS: "#",
+	},
+}

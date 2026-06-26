@@ -1,0 +1,143 @@
+syntax = "proto3";
+
+package shuncode;
+
+import "shuncode/common.proto";
+import "shuncode/ui.proto";
+
+option go_package = "github.com/shuncode/grpc-go/shuncode";
+option java_multiple_files = true;
+option java_package = "bot.shuncode.proto";
+
+// SessionService provides methods for managing sessions and receiving events.
+// Replaces TaskService.askResponse and postStateToWebview for messages.
+service SessionService {
+  // Create a new session
+  rpc createSession(CreateSessionRequest) returns (SessionInfo);
+  // Send a message to a session (always works, no routing needed)
+  rpc sendMessage(SendMessageRequest) returns (Empty);
+  // Respond to a pending approval request
+  rpc respondToApproval(ApprovalResponse) returns (Empty);
+  // Abort a running session
+  rpc abortSession(StringRequest) returns (Empty);
+  // Pause a running session (checkpoint)
+  rpc pauseSession(StringRequest) returns (Empty);
+  // Resume a paused session
+  rpc resumeSession(StringRequest) returns (Empty);
+  // Subscribe to all events from a session (replaces postStateToWebview for messages)
+  rpc subscribeToSession(StringRequest) returns (stream SessionEvent);
+  // Switch to an existing session by ID (multi-tab support)
+  rpc switchSession(StringRequest) returns (SessionInfo);
+  // Close a session tab by ID, destroys the session and its task
+  rpc closeSession(StringRequest) returns (Empty);
+}
+
+// Pipeline stage enum
+enum PipelineStageProto {
+  PREPARING = 0;
+  CALLING_API = 1;
+  STREAMING = 2;
+  TOOL_EXECUTION = 3;
+  AWAITING_APPROVAL = 4;
+  PIPELINE_COMPLETED = 5;
+}
+
+// Session state enum
+enum SessionStateProto {
+  SESSION_IDLE = 0;
+  SESSION_RUNNING = 1;
+  SESSION_PAUSED = 2;
+  SESSION_DONE = 3;
+  SESSION_ERROR = 4;
+}
+
+// Request to create a new session
+message CreateSessionRequest {
+  Metadata metadata = 1;
+  optional string session_id = 2;
+}
+
+// Session info returned after creation
+message SessionInfo {
+  string session_id = 1;
+  SessionStateProto state = 2;
+}
+
+// Request to send a message to a session
+message SendMessageRequest {
+  Metadata metadata = 1;
+  string session_id = 2;
+  string text = 3;
+  repeated string images = 4;
+  repeated string files = 5;
+}
+
+// Response to a pending approval
+message ApprovalResponse {
+  Metadata metadata = 1;
+  string session_id = 2;
+  string approval_id = 3;
+  bool approved = 4;
+  optional string feedback = 5;
+  repeated string images = 6;
+  repeated string files = 7;
+}
+
+// Pipeline progress information
+message PipelineProgressProto {
+  PipelineStageProto stage = 1;
+  optional float progress = 2;
+  optional string label = 3;
+  int32 iteration = 4;
+}
+
+// Approval request sent to frontend
+message ApprovalRequestProto {
+  string id = 1;
+  string tool_type = 2;
+  string tool_data = 3;
+  optional string description = 4;
+  optional string primary_text = 5;
+  optional string secondary_text = 6;
+}
+
+// Unified session event (one stream for all changes)
+message SessionEvent {
+  string session_id = 1;
+  oneof event {
+    StateChangedProto state_changed = 2;
+    MessageAddedProto message_added = 3;
+    MessageUpdatedProto message_updated = 4;
+    PipelineProgressProto pipeline_progress = 5;
+    ApprovalNeededProto approval_needed = 6;
+    ApprovalResolvedProto approval_resolved = 7;
+  }
+}
+
+// Session state changed
+message StateChangedProto {
+  SessionStateProto state = 1;
+  optional string reason = 2;
+}
+
+// New message added to session
+message MessageAddedProto {
+  ShuncodeMessage message = 1;
+}
+
+// Existing message updated (streaming partial)
+message MessageUpdatedProto {
+  int64 ts = 1;
+  ShuncodeMessage patch = 2;
+}
+
+// Approval needed from user
+message ApprovalNeededProto {
+  ApprovalRequestProto approval = 1;
+}
+
+// Approval resolved
+message ApprovalResolvedProto {
+  string approval_id = 1;
+  bool approved = 2;
+}

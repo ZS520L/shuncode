@@ -1,0 +1,1 @@
+export { deleteMemoryItem } from "./memoryItems"

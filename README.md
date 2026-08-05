@@ -10,14 +10,29 @@ ShunCode 是一款**一次买断、本地运行的 AI 代码编辑器**，基于
 
 ## 下载
 
+**最新版本：0.5.7**
+
 | 文件 | 说明 | 大小 |
 |------|------|------|
-| [ShunCodeUserSetup-x64-1.110.7.exe](https://github.com/ZS520L/shuncode/releases/download/v1.110.7/ShunCodeUserSetup-x64-1.110.7.exe) | Windows 安装包（推荐） | ~228 MB |
-| [ShunCode-win32-x64-1.110.7.zip](https://github.com/ZS520L/shuncode/releases/download/v1.110.7/ShunCode-win32-x64-1.110.7.zip) | Windows 便携版 | ~309 MB |
+| [ShunCode-0.5.7-win32-x64-Setup.exe](https://github.com/ZS520L/shuncode/releases/download/v0.5.7/ShunCode-0.5.7-win32-x64-Setup.exe) | Windows 10/11 x64 安装包 | 218.87 MiB |
+
+**SHA-256**：`5DA1899687A3BBB9BA420C83538E75AB09BBA435326A6777119B3E851A092250`
 
 **系统要求**：Windows 10/11 x64，建议至少 8GB 内存
 
+> 当前安装包尚未进行 Authenticode 代码签名，浏览器或 Windows SmartScreen 可能显示未知发布者或风险提示。请仅从本仓库 Release 下载，并核对上方 SHA-256。
+
 **官网**：[https://shuncode.pages.dev](https://shuncode.pages.dev)
+
+---
+
+## 0.5.7 更新
+
+- 原生 Chat/Agent 支持 Ask、Plan、Code 三种工作模式。
+- +菜单与拖动上下文统一为文件、文件夹和终端；文件与文件夹按路径引用，终端按受限文本快照发送。
+- 图片文件通过文件路径引用；`Ctrl+V` 粘贴图片可作为真实视觉输入发送给支持图片的模型。
+- Bridge 账号同时最多授权 2 台设备；新设备请求授权时会自动替换最久未活动的设备。
+- 帮助  关于显示 ShunCode 产品版本 `0.5.7`。
 
 ---
 

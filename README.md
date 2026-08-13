@@ -1,6 +1,6 @@
 # ShunCode
 
-> 把自定义 API、Codex 账号和网页版 AI，变成真正能操作本地项目的编程 Agent。
+> 把自定义 API、Codex 账号和网页版 AI，变成真正能操作本地项目的编程 Agent。QQ交流群：244627843
 
 ShunCode 是一款基于 Code-OSS 深度定制的本地 AI 代码编辑器。它吸收了 Cursor、Windsurf、Claude Code、Codex CLI、OpenCode 等主流 AI 编程产品已经验证的交互共识：**先理解项目，再规划任务；使用工具读取、搜索、修改和验证；并行执行可以并行的工作；所有改动都可审阅、可追踪、可回滚。**
 
@@ -11,24 +11,6 @@ ShunCode 是一款基于 Code-OSS 深度定制的本地 AI 代码编辑器。它
 3. **Bridge 桥接**：把本地工作区作为 MCP Server，接入支持自定义 MCP Connector 的 ChatGPT、Claude、Grok 等网页 AI。
 
 你可以按成本、模型能力、隐私要求和使用场景自由切换，不被单一模型厂商或单一计费方式锁定。
-
----
-
-## 下载
-
-**最新版本：0.5.7**
-
-| 文件 | 说明 | 大小 |
-|------|------|------|
-| [ShunCode-0.5.7-win32-x64-Setup.exe](https://github.com/ZS520L/shuncode/releases/download/v0.5.7/ShunCode-0.5.7-win32-x64-Setup.exe) | Windows 10/11 x64 安装包 | 218.87 MiB |
-
-**SHA-256**：`5DA1899687A3BBB9BA420C83538E75AB09BBA435326A6777119B3E851A092250`
-
-**系统要求**：Windows 10/11 x64，建议至少 8 GB 内存。
-
-> 当前安装包尚未进行 Authenticode 代码签名，浏览器或 Windows SmartScreen 可能显示“未知发布者”或风险提示。请仅从本仓库 Release 下载，并核对 SHA-256。
-
-**官网**：[https://shuncode.pages.dev](https://shuncode.pages.dev)
 
 ---
 
